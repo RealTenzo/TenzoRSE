@@ -9,7 +9,8 @@ no heap, no deps.
 
 tested against real tools so you dont have to wonder if it actually works
 
-https://files.catbox.moe/6qndlx.mp4
+[watch the demo](https://files.catbox.moe/6qndlx.mp4)
+
 
 ## usage
 
