@@ -1,15 +1,32 @@
+#include "TenzoRSE.h"
 #include <iostream>
 #include <string>
 
-#include "TenzoRSE.h"
+bool chkcreds(const std::string& user, const std::string& pass)
+{
+    if (TENZO_OBFUSCATE("admin").equals(user.c_str()) && TENZO_OBFUSCATE("1").equals(pass.c_str()))
+    {
+        return true;
+    }
+    return false;
+}
 
 int main()
 {
-    constexpr auto msg = TENZO_OBFUSCATE("hello world");
-    constexpr auto note = TENZO_OBFUSCATE("runtime string stays shuffled and transformed in memory made by tenzo");
-
-    std::cout << msg << '\n';
-    std::cout << note << '\n';
-    std::cout << TENZO_OBFUSCATE("\npress enter...");
+    std::string username, password;
+    std::cout << TENZO_OBFUSCATE("username: ");
+    std::cin >> username;
+    std::cout << TENZO_OBFUSCATE("Password: ");
+    std::cin >> password;
+    if (chkcreds(username, password))
+    {
+        std::cout << TENZO_OBFUSCATE("Login done") << std::endl;
+    }
+    else
+    {
+        std::cout << TENZO_OBFUSCATE("Login failed");
+    }
     std::cin.get();
+    std::cin.get();
+    return 0;
 }
