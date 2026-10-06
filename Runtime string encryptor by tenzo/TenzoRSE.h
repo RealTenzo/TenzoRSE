@@ -1,12 +1,21 @@
+// TenzoRSE - MIT (c) Tenzo
+// block cipher core derived from mux by Den Marche, same license terms
+
 #pragma once
-#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <ostream>
 #include <string>
-#include <cstring>
+#include <string_view>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -14,65 +23,133 @@ namespace tenzo
 {
     namespace detail
     {
-        constexpr std::size_t mix_seed(std::size_t seed, std::size_t index) noexcept
+        using u8 = std::uint8_t;
+        using u32 = std::uint32_t;
+        using u64 = std::uint64_t;
+
+        constexpr u32 delta = 0x9E3779B9u;
+        constexpr u32 rounds = 6u;
+
+        constexpr u64 mix(u64 x) noexcept
         {
-            return ((seed * 131u) + (index * 17u) + 23u) | 1u;
+            x += 0x9E3779B97F4A7C15ull;
+            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+            x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+            return x ^ (x >> 31);
         }
 
-        constexpr unsigned char rotate_left(unsigned char value, unsigned char shift) noexcept
+        constexpr u64 mix2(u64 x) noexcept
         {
-            shift &= 7u;
-            return shift == 0
-                ? value
-                : static_cast<unsigned char>((value << shift) | (value >> (8u - shift)));
+            x ^= x >> 33;
+            x *= 0xFF51AFD7ED558CCDull;
+            x ^= x >> 33;
+            x *= 0xC4CEB9FE1A85EC53ull;
+            x ^= x >> 33;
+            return x;
         }
 
-        constexpr unsigned char rotate_right(unsigned char value, unsigned char shift) noexcept
+        constexpr u32 bswap32(u32 v) noexcept
         {
-            shift &= 7u;
-            return shift == 0
-                ? value
-                : static_cast<unsigned char>((value >> shift) | (value << (8u - shift)));
+            return ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) |
+                ((v & 0x00FF0000u) >> 8) | ((v & 0xFF000000u) >> 24);
         }
 
-        constexpr unsigned char byte_mask(std::size_t seed, std::size_t original_index, std::size_t stored_index) noexcept
+        constexpr u32 rol(u32 v, u32 n) noexcept
         {
-            const std::size_t mixed = mix_seed(seed ^ ((original_index + 1u) * 97u), stored_index + 11u);
-            return static_cast<unsigned char>((mixed ^ (mixed >> 7u) ^ (mixed >> 13u)) & 0xFFu);
+            return (v << n) | (v >> (32u - n));
         }
 
-        constexpr unsigned char byte_bias(std::size_t seed, std::size_t original_index, std::size_t stored_index) noexcept
+        constexpr u32 load32(const u8* p) noexcept
         {
-            const std::size_t mixed = mix_seed(seed + ((stored_index + 1u) * 193u), original_index + 29u);
-            return static_cast<unsigned char>((mixed ^ (mixed >> 9u) ^ (mixed >> 15u)) & 0xFFu);
+            return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) |
+                (static_cast<u32>(p[2]) << 16) | (static_cast<u32>(p[3]) << 24);
         }
 
-        constexpr unsigned char rotation_amount(std::size_t seed, std::size_t original_index, std::size_t stored_index) noexcept
+        constexpr void st32(u8* p, u32 v) noexcept
         {
-            return static_cast<unsigned char>((mix_seed(seed + (original_index * 31u), stored_index + 7u) % 7u) + 1u);
+            p[0] = static_cast<u8>(v);
+            p[1] = static_cast<u8>(v >> 8);
+            p[2] = static_cast<u8>(v >> 16);
+            p[3] = static_cast<u8>(v >> 24);
         }
 
-        constexpr unsigned char encode_byte(unsigned char value, std::size_t seed, std::size_t original_index, std::size_t stored_index) noexcept
-        {
-            const unsigned char mask = byte_mask(seed, original_index, stored_index);
-            const unsigned char bias = byte_bias(seed, original_index, stored_index);
-            const unsigned char rotation = rotation_amount(seed, original_index, stored_index);
+        struct keys { u32 k[4]; };
 
-            return static_cast<unsigned char>(rotate_left(static_cast<unsigned char>(value ^ mask), rotation) + bias);
+        constexpr keys derive(u64 seed, std::size_t n) noexcept
+        {
+            const u64 m0 = mix(mix2(seed ^ (static_cast<u64>(n) * 0x100000001B3ull)));
+            const u64 m1 = mix(m0 + 0xD1B54A32D192ED03ull);
+            return keys{{
+                0x6B206574u ^ static_cast<u32>(m0),
+                0x79622D32u ^ static_cast<u32>(m0 >> 32),
+                0x3320646Eu ^ static_cast<u32>(m1),
+                0x61707865u ^ static_cast<u32>(m1 >> 32),
+            }};
         }
 
-        constexpr unsigned char decode_byte(unsigned char value, std::size_t seed, std::size_t original_index, std::size_t stored_index) noexcept
+        constexpr keys tweak(const keys& ks, u32 idx) noexcept
         {
-            const unsigned char mask = byte_mask(seed, original_index, stored_index);
-            const unsigned char bias = byte_bias(seed, original_index, stored_index);
-            const unsigned char rotation = rotation_amount(seed, original_index, stored_index);
-
-            return static_cast<unsigned char>(rotate_right(static_cast<unsigned char>(value - bias), rotation) ^ mask);
+            const u64 m = mix((static_cast<u64>(idx) << 32) | ks.k[0]);
+            return keys{{
+                ks.k[0] ^ static_cast<u32>(m),
+                ks.k[1] ^ static_cast<u32>(m >> 32),
+                bswap32(ks.k[2] + static_cast<u32>(m >> 11)),
+                bswap32(ks.k[3] - static_cast<u32>(m >> 43)),
+            }};
         }
 
-        constexpr std::size_t hash_time(const char* str, std::size_t h = 0) noexcept
+        constexpr u32 arx(u32 v, u32 k, u32 r) noexcept
         {
-            return (*str == '\0') ? h : hash_time(str + 1, ((h * 131u) ^ static_cast<std::size_t>(*str)) + 7u);
+            u32 t = v + k + ((r + 1u) * delta);
+            t ^= rol(t, 7u);
+            t += k;
+            t ^= rol(t, 11u);
+            return t ^ (k * delta);
+        }
+
+        constexpr void blk_fwd(u8* p, const u32* k) noexcept
+        {
+            u32 l = load32(p) ^ k[2];
+            u32 r = load32(p + 4) ^ k[3];
+            for (u32 i = 0; i != rounds; ++i)
+            {
+                const u32 t = l ^ arx(r, k[i & 3u], i);
+                l = r;
+                r = t;
+            }
+            r ^= rol(l, 19u);
+            st32(p, l + r);
+            st32(p + 4, r);
+        }
+
+        constexpr void blk_inv(u8* p, const u32* k) noexcept
+        {
+            u32 r = load32(p + 4);
+            u32 l = load32(p) - r;
+            r ^= rol(l, 19u);
+            for (u32 i = rounds; i-- != 0;)
+            {
+                const u32 t = r ^ arx(l, k[i & 3u], i);
+                r = l;
+                l = t;
+            }
+            st32(p, l ^ k[2]);
+            st32(p + 4, r ^ k[3]);
+        }
+
+        constexpr u64 tick_hash(const char* s) noexcept
+        {
+            u64 h = 14695981039346656037ull;
+            while (*s) h = (h ^ static_cast<u8>(*s++)) * 1099511628211ull;
+            return h;
+        }
+
+        constexpr u64 seed_of(const char* txt, u64 line, u64 ctr, u64 tick) noexcept
+        {
+            u64 h = 14695981039346656037ull;
+            while (*txt) h = (h ^ static_cast<u8>(*txt++)) * 1099511628211ull;
+            return mix(mix2(h ^ (line * 0x9E3779B97F4A7C15ull) ^
+                (ctr * 0xC2B2AE3D27D4EB4Full) ^ (tick * 0xD6E8FEB86659FD93ull)));
         }
 
         inline void wipe(void* ptr, std::size_t len) noexcept
@@ -80,85 +157,187 @@ namespace tenzo
 #ifdef _WIN32
             SecureZeroMemory(ptr, len);
 #else
-            volatile unsigned char* p = static_cast<volatile unsigned char*>(ptr);
+            volatile u8* p = static_cast<volatile u8*>(ptr);
             while (len--) *p++ = 0;
 #endif
         }
-
-        template <std::size_t N, std::size_t Seed>
-        struct storage_holder
-        {
-            std::array<unsigned char, N> data;
-            std::array<std::size_t, N - 1> order;
-        };
     }
 
-    template <std::size_t N, std::size_t Seed>
-    class obfuscated_string
+    inline void wipe(void* ptr, std::size_t len) noexcept
+    {
+        detail::wipe(ptr, len);
+    }
+
+    template <std::size_t Cap>
+    class view
     {
     public:
-        constexpr explicit obfuscated_string(const char(&text)[N]) noexcept
-            : storage_()
+        explicit view(const char* src) noexcept : len_(0), buf_()
         {
-            build_order();
-            shuffle_text(text);
+            for (; len_ + 1 < Cap && src[len_]; ++len_) buf_[len_] = src[len_];
+            buf_[len_] = '\0';
         }
 
-        constexpr std::size_t size() const noexcept { return N - 1; }
+        view(const view&) = delete;
+        view& operator=(const view&) = delete;
 
-        char get(std::size_t index) const noexcept
+        view(view&& other) noexcept : len_(other.len_), buf_()
         {
-            if (index >= size()) return '\0';
-            unsigned char decoded = detail::decode_byte(
-                storage_.data[storage_.order[index]], Seed, index, storage_.order[index]);
-            return static_cast<char>(decoded);
+            for (std::size_t i = 0; i < Cap; ++i) buf_[i] = other.buf_[i];
+            wipe(other.buf_, Cap);
+            other.buf_[0] = '\0';
+            other.len_ = 0;
         }
+
+        ~view() { wipe(buf_, sizeof(buf_)); }
+
+        const char* c_str() const noexcept { return buf_; }
+        const char* data() const noexcept { return buf_; }
+        std::size_t size() const noexcept { return len_; }
+        operator const char*() const noexcept { return buf_; }
+
+    private:
+        std::size_t len_;
+        char buf_[Cap];
+    };
+
+    template <std::size_t N, detail::u64 Seed>
+    class obfuscated_string
+    {
+        static_assert(N > 0, "literal needs at least a NUL");
+
+        static constexpr std::size_t TOTAL = N + ((8u - (N & 7u)) & 7u);
+        static constexpr detail::u32 BLOCKS = static_cast<detail::u32>(TOTAL / 8u);
+
+    public:
+        constexpr explicit obfuscated_string(const char (&txt)[N]) noexcept : store_()
+        {
+            const detail::keys ks = detail::derive(Seed, N);
+            for (std::size_t i = 0; i < N; ++i)
+                store_[i] = static_cast<detail::u8>(txt[i]);
+            for (std::size_t i = N; i < TOTAL; ++i)
+                store_[i] = static_cast<detail::u8>(
+                    detail::mix(Seed ^ (i * 0x9E3779B97F4A7C15ull)) >> ((i * 5u) & 31u));
+            for (detail::u32 b = 0; b != BLOCKS; ++b)
+            {
+                const detail::keys tk = detail::tweak(ks, b);
+                detail::blk_fwd(&store_[b * 8u], tk.k);
+            }
+        }
+
+        constexpr std::size_t size() const noexcept { return N - 1u; }
+
+        constexpr char get(std::size_t i) const noexcept
+        {
+            if (i >= size()) return '\0';
+            detail::u8 blk[8];
+            dec_block(static_cast<detail::u32>(i >> 3), blk);
+            return static_cast<char>(blk[i & 7u]);
+        }
+
+        constexpr char operator[](std::size_t i) const noexcept { return get(i); }
 
         template <typename F>
         void each(F&& fn) const
         {
-            unsigned char temp;
-            for (std::size_t i = 0; i < size(); ++i)
+            detail::u8 blk[8];
+            for (detail::u32 b = 0; b != BLOCKS; ++b)
             {
-                temp = detail::decode_byte(
-                    storage_.data[storage_.order[i]], Seed, i, storage_.order[i]);
-                fn(static_cast<char>(temp));
-                temp = 0;
+                dec_block(b, blk);
+                const std::size_t lo = static_cast<std::size_t>(b) * 8u;
+                const std::size_t hi = lo + 8u < size() ? lo + 8u : size();
+                for (std::size_t i = lo; i < hi; ++i)
+                    fn(static_cast<char>(blk[i - lo]));
+                wipe(blk, sizeof(blk));
             }
         }
 
-        bool equals(const char* other) const
+        bool equals(std::string_view s) const noexcept
         {
-            if (!other) return false;
-            unsigned char temp;
-            for (std::size_t i = 0; i < size(); ++i)
+            if (s.size() != size()) return false;
+            const char* other = s.data();
+            detail::u8 blk[8];
+            detail::u32 diff = 0;
+            for (detail::u32 b = 0; b != BLOCKS; ++b)
             {
-                temp = detail::decode_byte(
-                    storage_.data[storage_.order[i]], Seed, i, storage_.order[i]);
-                if (static_cast<char>(temp) != other[i])
-                {
-                    temp = 0;
-                    return false;
-                }
-                if (other[i] == '\0')
-                {
-                    temp = 0;
-                    return false;
-                }
-                temp = 0;
+                dec_block(b, blk);
+                const std::size_t lo = static_cast<std::size_t>(b) * 8u;
+                const std::size_t hi = lo + 8u < size() ? lo + 8u : size();
+                for (std::size_t i = lo; i < hi; ++i)
+                    diff |= static_cast<detail::u32>(blk[i - lo]) ^ static_cast<detail::u32>(static_cast<detail::u8>(other[i]));
+                wipe(blk, sizeof(blk));
             }
-            return other[size()] == '\0';
+            return diff == 0;
         }
 
-        void into(char* buffer, std::size_t buf_size) const
+        bool equals(const char* s) const noexcept
         {
-            if (!buffer || buf_size <= size()) return;
-            for (std::size_t i = 0; i < size(); ++i)
+            return s != nullptr && equals(std::string_view(s));
+        }
+
+        bool equals(const std::string& s) const noexcept
+        {
+            return equals(std::string_view(s));
+        }
+
+        void into(char* dst, std::size_t cap) const noexcept
+        {
+            if (dst == nullptr || cap <= size()) return;
+            detail::u8 blk[8];
+            for (detail::u32 b = 0; b != BLOCKS; ++b)
             {
-                buffer[i] = static_cast<char>(detail::decode_byte(
-                    storage_.data[storage_.order[i]], Seed, i, storage_.order[i]));
+                dec_block(b, blk);
+                const std::size_t lo = static_cast<std::size_t>(b) * 8u;
+                const std::size_t hi = lo + 8u < size() ? lo + 8u : size();
+                for (std::size_t i = lo; i < hi; ++i)
+                    dst[i] = static_cast<char>(blk[i - lo]);
+                wipe(blk, sizeof(blk));
             }
-            buffer[size()] = '\0';
+            dst[size()] = '\0';
+        }
+
+        view<N> open() const
+        {
+            char tmp[N];
+            into(tmp, N);
+            view<N> out(tmp);
+            wipe(tmp, sizeof(tmp));
+            return out;
+        }
+
+        operator const char*() const
+        {
+            thread_local std::string slots[8];
+            thread_local std::size_t next = 0;
+            std::string& slot = slots[next];
+            next = (next + 1u) & 7u;
+            slot.assign(size(), '\0');
+            char* dst = &slot[0];
+            detail::u8 blk[8];
+            for (detail::u32 b = 0; b != BLOCKS; ++b)
+            {
+                dec_block(b, blk);
+                const std::size_t lo = static_cast<std::size_t>(b) * 8u;
+                const std::size_t hi = lo + 8u < size() ? lo + 8u : size();
+                for (std::size_t i = lo; i < hi; ++i)
+                    dst[i] = static_cast<char>(blk[i - lo]);
+                wipe(blk, sizeof(blk));
+            }
+            return slot.c_str();
+        }
+
+        std::string str() const
+        {
+            const view<N> held = open();
+            return std::string(held.c_str());
+        }
+
+        detail::u64 hash() const noexcept
+        {
+            detail::u64 h = 14695981039346656037ull;
+            each([&h](char c)
+                { h = (h ^ static_cast<detail::u8>(c)) * 1099511628211ull; });
+            return h;
         }
 
         void print(std::ostream& stream) const
@@ -167,52 +346,126 @@ namespace tenzo
         }
 
     private:
-        constexpr void build_order() noexcept
+        constexpr void dec_block(detail::u32 b, detail::u8* out) const noexcept
         {
-            for (std::size_t i = 0; i < size(); ++i) storage_.order[i] = i;
-            if (size() < 2) return;
-
-            for (std::size_t i = size(); i > 1; --i)
-            {
-                const std::size_t current = i - 1;
-                const std::size_t swap_with = detail::mix_seed(Seed, current) % i;
-                const std::size_t temp = storage_.order[current];
-                storage_.order[current] = storage_.order[swap_with];
-                storage_.order[swap_with] = temp;
-            }
+            const detail::keys tk = detail::tweak(detail::derive(Seed, N), b);
+            for (int i = 0; i < 8; ++i) out[i] = store_[b * 8u + static_cast<detail::u32>(i)];
+            detail::blk_inv(out, tk.k);
         }
 
-        constexpr void shuffle_text(const char(&text)[N]) noexcept
-        {
-            for (std::size_t i = 0; i < size(); ++i)
-            {
-                const std::size_t stored_index = storage_.order[i];
-                storage_.data[stored_index] = detail::encode_byte(
-                    static_cast<unsigned char>(text[i]), Seed, i, stored_index);
-            }
-            storage_.data[size()] = detail::encode_byte('\0', Seed, size(), size());
-        }
-
-        detail::storage_holder<N, Seed> storage_;
+        detail::u8 store_[TOTAL];
     };
 
-    template <std::size_t Seed, std::size_t N>
-    constexpr obfuscated_string<N, Seed> make_obfuscated(const char(&text)[N]) noexcept
-    {
-        return obfuscated_string<N, Seed>(text);
-    }
-
-    template <std::size_t N, std::size_t Seed>
+    template <std::size_t N, detail::u64 Seed>
     std::ostream& operator<<(std::ostream& stream, const obfuscated_string<N, Seed>& val)
     {
         val.print(stream);
         return stream;
     }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator==(const obfuscated_string<N, Seed>& a, std::string_view b) noexcept
+    {
+        return a.equals(b);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator==(std::string_view a, const obfuscated_string<N, Seed>& b) noexcept
+    {
+        return b.equals(a);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator==(const obfuscated_string<N, Seed>& a, const std::string& b) noexcept
+    {
+        return a.equals(b);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator==(const std::string& a, const obfuscated_string<N, Seed>& b) noexcept
+    {
+        return b.equals(a);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator==(const obfuscated_string<N, Seed>& a, const char* b) noexcept
+    {
+        return a.equals(b);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator==(const char* a, const obfuscated_string<N, Seed>& b) noexcept
+    {
+        return b.equals(a);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator!=(const obfuscated_string<N, Seed>& a, std::string_view b) noexcept
+    {
+        return !a.equals(b);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator!=(std::string_view a, const obfuscated_string<N, Seed>& b) noexcept
+    {
+        return !b.equals(a);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator!=(const obfuscated_string<N, Seed>& a, const std::string& b) noexcept
+    {
+        return !a.equals(b);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator!=(const std::string& a, const obfuscated_string<N, Seed>& b) noexcept
+    {
+        return !b.equals(a);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator!=(const obfuscated_string<N, Seed>& a, const char* b) noexcept
+    {
+        return !a.equals(b);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    bool operator!=(const char* a, const obfuscated_string<N, Seed>& b) noexcept
+    {
+        return !b.equals(a);
+    }
+
+    namespace detail
+    {
+        template <u64 Seed, std::size_t N>
+        constexpr obfuscated_string<N, Seed> seal(const char (&txt)[N]) noexcept
+        {
+            return obfuscated_string<N, Seed>(txt);
+        }
+    }
+
+    template <detail::u64 Seed, std::size_t N>
+    constexpr obfuscated_string<N, Seed> make_obfuscated(const char (&txt)[N]) noexcept
+    {
+        return obfuscated_string<N, Seed>(txt);
+    }
+
+    template <std::size_t N, detail::u64 Seed>
+    using crypt_str = obfuscated_string<N, Seed>;
 }
 
-#define TENZO_OBFUSCATE(text) \
-    ::tenzo::make_obfuscated< \
-        (::tenzo::detail::hash_time(__TIME__) * 16777619u) ^ \
-        (static_cast<std::size_t>(__COUNTER__) * 1103515245u) ^ \
-        (static_cast<std::size_t>(__LINE__) * 214013u) \
-    >(text)
+#define TENZO_OBFUSCATE(txt)                                                        \
+    []() -> const auto& {                                                           \
+        static constexpr auto tenzo_sealed = ::tenzo::detail::seal<                  \
+            ::tenzo::detail::seed_of(txt, __LINE__, __COUNTER__,                    \
+                ::tenzo::detail::tick_hash(__TIME__))>(txt);                        \
+        return tenzo_sealed;                                                        \
+    }()
+
+#define TENZO_AUTO(txt)                                                             \
+    []() -> const char* {                                                           \
+        static constexpr auto tenzo_sealed = ::tenzo::detail::seal<                  \
+            ::tenzo::detail::seed_of(txt, __LINE__, __COUNTER__,                    \
+                ::tenzo::detail::tick_hash(__TIME__))>(txt);                        \
+        return tenzo_sealed;                                                        \
+    }()

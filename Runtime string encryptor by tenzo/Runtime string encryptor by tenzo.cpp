@@ -2,31 +2,27 @@
 #include <iostream>
 #include <string>
 
-bool chkcreds(const std::string& user, const std::string& pass)
+bool chk_creds(const std::string& user, const std::string& pass)
 {
-    if (TENZO_OBFUSCATE("admin").equals(user.c_str()) && TENZO_OBFUSCATE("1").equals(pass.c_str()))
-    {
-        return true;
-    }
-    return false;
+    return user == "admin" && pass == "peak123";
 }
 
 int main()
 {
-    std::string username, password;
-    std::cout << TENZO_OBFUSCATE("username: ");
+    std::string username;
+    std::string password;
+    std::cout << "username: ";
     std::cin >> username;
-    std::cout << TENZO_OBFUSCATE("Password: ");
+    std::cout << "password: ";
     std::cin >> password;
-    if (chkcreds(username, password))
+    if (chk_creds(username, password))
     {
-        std::cout << TENZO_OBFUSCATE("Login done") << std::endl;
+        std::cout << "login ok" << std::endl;
+        std::cout << "token: very_peak_token" << std::endl;
     }
     else
     {
-        std::cout << TENZO_OBFUSCATE("Login failed");
+        std::cout << "login failed" << std::endl;
     }
-    std::cin.get();
-    std::cin.get();
     return 0;
 }
